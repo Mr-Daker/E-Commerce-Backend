@@ -6,6 +6,7 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataIntegrityViolationException;
 
 @SpringBootApplication
 public class InventoryServiceApplication {
@@ -18,18 +19,24 @@ public class InventoryServiceApplication {
 	@Bean
 	public CommandLineRunner loadData(InventoryRepository inventoryRepository){
 		return args -> {
-			Inventory inventory1 =new Inventory();
-			inventory1.setSkuCode("Iphone_13");
-			inventory1.setQuantity(100);
-
-			Inventory inventory2 =new Inventory();
-			inventory2.setSkuCode("Iphone_14");
-			inventory2.setQuantity(10);
-
-			inventoryRepository.save(inventory1);
-			inventoryRepository.save(inventory2);
-
+			createInventoryIfMissing(inventoryRepository, "Iphone_13", 100);
+			createInventoryIfMissing(inventoryRepository, "Iphone_14", 10);
 		};
+	}
+
+	private void createInventoryIfMissing(InventoryRepository inventoryRepository, String skuCode, Integer quantity) {
+		if (inventoryRepository.existsBySkuCode(skuCode)) {
+			return;
+		}
+
+		Inventory inventory = new Inventory();
+		inventory.setSkuCode(skuCode);
+		inventory.setQuantity(quantity);
+        try {
+            inventoryRepository.saveAndFlush(inventory);
+        } catch (DataIntegrityViolationException ignored) {
+            // Another replica inserted the seed row concurrently.
+        }
 	}
 
 }

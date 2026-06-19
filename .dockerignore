@@ -1,0 +1,11 @@
+.git
+.idea
+.vscode
+target
+**/target
+build
+**/build
+*.iml
+*.iws
+*.ipr
+.DS_Store

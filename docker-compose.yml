@@ -1,0 +1,270 @@
+services:
+  mongo:
+    image: mongo:6.0
+    container_name: shopping-mongo
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mysql:
+    image: mysql:8.0
+    container_name: shopping-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: shopping-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-shopping}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-shopping}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: shopping-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    container_name: shopping-zipkin
+    ports: ["127.0.0.1:9411:9411"]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: shopping-prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [alertmanager]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: shopping-alertmanager
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["127.0.0.1:9093:9093"]
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: shopping-loki
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: shopping-promtail
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./observability/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    container_name: shopping-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USERNAME:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - ./observability/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus, loki, zipkin]
+
+  discovery-server:
+    build:
+      context: .
+      args:
+        MODULE: discovery-server
+    container_name: shopping-discovery-server
+    environment:
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+
+  product-service:
+    build:
+      context: .
+      args:
+        MODULE: product-service
+    container_name: shopping-product-service
+    depends_on:
+      mongo:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    environment:
+      MONGO_URI: mongodb://mongo:27017/product-service
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  inventory-service:
+    build:
+      context: .
+      args:
+        MODULE: inventory-service
+    container_name: shopping-inventory-service
+    depends_on:
+      mysql:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    environment:
+      INVENTORY_DB_URL: jdbc:mysql://mysql:3306/inventoryservice?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  order-service:
+    build:
+      context: .
+      args:
+        MODULE: order-service
+    container_name: shopping-order-service
+    depends_on:
+      mysql:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ORDER_DB_URL: jdbc:mysql://mysql:3306/order-service?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-shopping}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-shopping}
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  notification-service:
+    build:
+      context: .
+      args:
+        MODULE: notification-service
+    container_name: shopping-notification-service
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    environment:
+      NOTIFICATION_DB_URL: jdbc:mysql://mysql:3306/notificationservice?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-shopping}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-shopping}
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  cart-service:
+    build:
+      context: .
+      args: { MODULE: cart-service }
+    container_name: shopping-cart-service
+    depends_on:
+      mongo: { condition: service_healthy }
+      discovery-server: { condition: service_started }
+    environment:
+      MONGO_URI: mongodb://mongo:27017/cart-service
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      SPRING_ZIPKIN_BASE_URL: http://zipkin:9411
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  checkout-service:
+    build:
+      context: .
+      args: { MODULE: checkout-service }
+    container_name: shopping-checkout-service
+    depends_on:
+      cart-service: { condition: service_started }
+      order-service: { condition: service_started }
+      discovery-server: { condition: service_started }
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      SPRING_ZIPKIN_BASE_URL: http://zipkin:9411
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+  api-gateway:
+    build:
+      context: .
+      args:
+        MODULE: api-gateway
+    container_name: shopping-api-gateway
+    depends_on:
+      discovery-server:
+        condition: service_started
+      product-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+      cart-service:
+        condition: service_started
+      checkout-service:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    ports:
+      - "9003:9003"
+    environment:
+      EUREKA_SERVER_URL: http://discovery-server:9004/eureka
+      SHOP_API_USERNAME: ${SHOP_API_USERNAME:-shop-user}
+      SHOP_API_PASSWORD: ${SHOP_API_PASSWORD:-change-me}
+      GATEWAY_RATE_PER_SECOND: ${GATEWAY_RATE_PER_SECOND:-20}
+      GATEWAY_BURST_CAPACITY: ${GATEWAY_BURST_CAPACITY:-40}
+      GATEWAY_MAX_REQUEST_SIZE: ${GATEWAY_MAX_REQUEST_SIZE:-1MB}
+      REDIS_HOST: redis
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    restart: on-failure
+
+volumes:
+  mongo-data:
+  mysql-data:
+  rabbitmq-data:
+  redis-data:
+  loki-data:
+  grafana-data:

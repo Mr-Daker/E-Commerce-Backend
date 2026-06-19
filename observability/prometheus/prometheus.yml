@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: ["alertmanager:9093"] }]
+rule_files: ["/etc/prometheus/alerts.yml"]
+scrape_configs:
+  - job_name: shopping-services
+    metrics_path: /actuator/prometheus
+    basic_auth: { username: shop-user, password: change-me }
+    static_configs:
+      - targets:
+          - api-gateway:9003
+          - discovery-server:9004
+          - product-service:9000
+          - order-service:9001
+          - inventory-service:9002
+          - notification-service:9005
+          - cart-service:9006
+          - checkout-service:9007
